@@ -8,15 +8,19 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from urllib.robotparser import RobotFileParser
 import csv
+import sys
+import os
+import queue
 
 class Crawler:
     
-    def __init__(self, seed, depth, maxi:100):
+    def __init__(self, seed, target, maxi:100):
         self.seed = seed
-        self.depth = depth
+        self.target = target
         self.semaphore = asyncio.BoundedSemaphore(maxi)  # Maximum concurrent HTTP clients
-        self.found_urls = set()  # Already found URLs
+        self.found_urls = set()  #   Already found URLs
         self.session = aiohttp.ClientSession()
+        self.counter = 1  # counts found URLs
 
     async def _get(self, url):
         """HTTP GETs URL. Returns HTML if 200, prints error if failed.
@@ -103,44 +107,62 @@ class Crawler:
 
     def _export_csv(self, data):
         """Writes data to a .csv file in the working directory.
-        :param data: URL, depth, title, description to write
+        :param data: URL, title, description to write
         :type data: dict
         """
         with open("crawler.csv", "w", newline="", encoding="utf-8") as csvfile:
-            fieldnames = ["url", "depth", "title", "desc"]
+            fieldnames = ["url", "title", "desc"]
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames, delimiter=",", quotechar='"', quoting=csv.QUOTE_ALL)
             writer.writeheader()
             writer.writerows(data)
 
     async def crawl(self):
-        """Main crawling function. Crawls within self.depth, starts from self.seed.
+        """Main crawling function. Crawls starting from self.seed.
         """
-        to_scan = [self.seed]
+        q = queue.Queue()
+        q.put(self.seed)
         data = []
-        for depth in range(self.depth + 1):  # crawling depth
-            for url in to_scan:
-                robotlink = urljoin(url, "/robots.txt")
-                robot = await self._get(robotlink)
-                if self._robot_parser(robot, url):  # robot.txt politeness
-                    got_data = await self._find_data(url)
-                    new_links, page_data = got_data[0], got_data[1]
-                    print(url)
-                    if url not in self.found_urls:  # exclude scanned URLs
-                        to_scan.extend(new_links)
+        while self.counter <= self.target:
+            url = q.get()
+            robotlink = urljoin(url, "/robots.txt")
+            robot = await self._get(robotlink)
+            if self._robot_parser(robot, url):  # robot.txt politeness
+                got_data = await self._find_data(url)
+                new_links, page_data = got_data[0], got_data[1]
+                print(f"{self.counter} out of {self.target}: {url}")                    
+                for x in new_links:
+                    if x not in self.found_urls:
+                        q.put(x)
 
-                    if new_links and page_data:  # both must not be None to write
-                        datadict = dict(url=url, depth=depth)
-                        datadict.update(page_data)
-                        data.append(datadict)
+                if new_links and page_data:  # both must not be None to write
+                    datadict = dict(url=url)
+                    datadict.update(page_data)
+                    data.append(datadict)
+                    self.counter += 1
 
-                    for x in new_links:
-                        self.found_urls.add(x)
-                else:
-                    print(f"Caught in {robotlink}")
-        self._export_csv(data)
+                for x in new_links:
+                    self.found_urls.add(x)
+                q.task_done
+            else:
+                print(f"Caught in {robotlink}")
+
+        try:
+            self._export_csv(data)
+            print(f"Saved .csv file, check {os.getcwd()}")
+        except Exception as e:
+            print(f"Could not save: {e}")
         await self.session.close()
-    
+
+print("Asynchronous web crawler.\n")
+
+try:
+    seed = input("Enter seed URL: ")
+    target = int(input("Enter target crawling count: "))
+    maxi = int(input("Enter maximum concurrent HTTP workers (Default 100 recommended): "))
+except ValueError:
+    sys.exit("ValueError: Enter correct values.")
+
+c = Crawler(seed, target, maxi)
 loop = asyncio.get_event_loop()
-c = Crawler("https://docs.python.org", 5, 100)
 loop.run_until_complete(c.crawl())
 loop.close
